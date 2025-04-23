@@ -19,7 +19,7 @@ allow_no_url_param_also = allow_no_url_param_also == "true"
 
 
 app = FastAPI(openapi_url=None, docs_url=docs_url, redoc_url=redoc_url)
-default_port = "5010"
+default_port = "8080"
 
 if enable_docs:
     @app.get('/')
