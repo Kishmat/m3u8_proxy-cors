@@ -54,11 +54,13 @@ async def cors(request: Request, origins, method="GET") -> Response:
                 continue
 
             if stripped.startswith("http"):
-                segment_url = stripped
+                parsed = urlparse(stripped)
+                segment_url = f"https://{parsed.netloc}{parsed.path}"
             elif stripped.startswith("/"):
-                segment_url = requested.scheme + "://" + requested.netloc + stripped
+                segment_url = f"https://{requested.netloc}{stripped}"
             else:
-                segment_url = base_url + "/" + stripped
+                base = requested.url.rsplit("/", 1)[0]
+                segment_url = f"https://{requested.netloc}/{base.split('/')[-1]}/{stripped}"
 
             proxied_segment = f"{main_url}{requested.safe_sub(segment_url)}"
             new_content += proxied_segment + "\n"
