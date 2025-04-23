@@ -41,7 +41,7 @@ async def cors(request: Request, origins, method="GET") -> Response:
     for key in ['Vary', 'Content-Encoding', 'Transfer-Encoding', 'Content-Length']:
         headers.pop(key, None)
 
-    # Rewrite m3u8 content to route segment files through the proxy, and force https
+    # Rewrite m3u8 content to route segment files through the proxy
     if (file_type == "m3u8" or ".m3u8" in url) and code != 404:
         content = content.decode("utf-8")
         new_content = ""
@@ -54,18 +54,18 @@ async def cors(request: Request, origins, method="GET") -> Response:
                 continue
 
             if stripped.startswith("http"):
-                parsed = urlparse(stripped)
-                segment_url = "https://" + parsed.netloc + parsed.path
+                segment_url = stripped
             elif stripped.startswith("/"):
-                segment_url = "https://" + requested.netloc + stripped
+                segment_url = requested.scheme + "://" + requested.netloc + stripped
             else:
-                segment_url = "https://" + requested.netloc + "/" + '/'.join(base_url.split("/")[3:]) + "/" + stripped
+                segment_url = base_url + "/" + stripped
 
             proxied_segment = f"{main_url}{requested.safe_sub(segment_url)}"
             new_content += proxied_segment + "\n"
 
         content = new_content
 
+    # Rewrite redirect Location headers if needed
     if "location" in headers:
         if headers["location"].startswith("/"):
             headers["location"] = requested.host + headers["location"]
