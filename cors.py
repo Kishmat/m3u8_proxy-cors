@@ -4,48 +4,59 @@ from fastapi import Request, Response, Cookie
 from fastapi.responses import RedirectResponse
 from request_helper import Requester
 from typing import Annotated
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 
 async def cors(request: Request, origins, method="GET") -> Response:
-    current_domain = request.headers.get("origin") or origins
-    if current_domain not in origins.replace(", ", ",").split(",") and origins != "*":
-        return Response()
+    allowed_origins = origins.replace(", ", ",").split(",")
+    current_origin = request.headers.get("origin")
+
+    # Allow localhost testing
+    if current_origin is None:
+        client_host = request.client.host
+        if client_host in ("127.0.0.1", "localhost"):
+            current_origin = "http://localhost"
+        else:
+            return Response(status_code=403)
+
+    if origins != "*" and current_origin not in allowed_origins:
+        return Response(status_code=403)
 
     if not request.query_params.get('url'):
-        return Response()
+        return Response("Missing 'url' parameter", status_code=400)
 
     file_type = request.query_params.get('type')
-    requested = Requester(str(request.url))
-    main_url = requested.host + requested.path + "?url="
-    url = requested.query_params.get("url")
-    if requested.remaining_params:
-        url += "?" + requested.query_string(requested.remaining_params)
+    original_url = request.query_params.get("url")
+    requested = Requester(original_url)
+    base_url = requested.host + requested.path.rsplit("/", 1)[0]
 
-    requested = Requester(url)
-    hdrs = request.headers.mutablecopy()
-    hdrs["Accept-Encoding"] = ""
-    hdrs.update(json.loads(request.query_params.get("headers", "{}").replace("'", '"')))
+    # For building proxy paths
+    main_url = str(request.url).split("?")[0] + "?url="
+    additional_query = requested.query_string(requested.remaining_params)
 
-    content, headers, code, cookies = requested.get(
+    headers = request.headers.mutablecopy()
+    headers["Accept-Encoding"] = ""
+    headers.update(json.loads(request.query_params.get("headers", "{}").replace("'", '"')))
+
+    content, resp_headers, code, _ = requested.get(
         data=None,
-        headers=hdrs,
+        headers=headers,
         cookies=request.cookies,
         method=request.query_params.get("method", method),
         json_data=json.loads(request.query_params.get("json", "{}")),
         additional_params=json.loads(request.query_params.get("params", "{}"))
     )
 
-    headers['Access-Control-Allow-Origin'] = current_domain
+    resp_headers['Access-Control-Allow-Origin'] = current_origin
 
-    for key in ['Vary', 'Content-Encoding', 'Transfer-Encoding', 'Content-Length']:
-        headers.pop(key, None)
+    # Strip unwanted headers
+    for key in ["Vary", "Content-Encoding", "Transfer-Encoding", "Content-Length"]:
+        resp_headers.pop(key, None)
 
-    # Rewrite m3u8 content to route segment files through the proxy
-    if (file_type == "m3u8" or ".m3u8" in url) and code != 404:
+    # If m3u8, rewrite its contents
+    if (file_type == "m3u8" or ".m3u8" in original_url) and code != 404:
         content = content.decode("utf-8")
         new_content = ""
-        base_url = requested.url.rsplit("/", 1)[0]
 
         for line in content.splitlines():
             stripped = line.strip()
@@ -53,57 +64,47 @@ async def cors(request: Request, origins, method="GET") -> Response:
                 new_content += line + "\n"
                 continue
 
+            # Rewriting URLs to go through proxy
             if stripped.startswith("http"):
-                parsed = urlparse(stripped)
-                segment_url = f"https://{parsed.netloc}{parsed.path}"
+                proxied = main_url + quote(stripped, safe="")
             elif stripped.startswith("/"):
-                segment_url = f"https://{requested.netloc}{stripped}"
+                full = f"https://{requested.netloc}{stripped}"
+                proxied = main_url + quote(full, safe="")
             else:
-                base = requested.url.rsplit("/", 1)[0]
-                segment_url = f"https://{requested.netloc}/{base.split('/')[-1]}/{stripped}"
+                # Relative paths
+                full = f"https://{requested.netloc}/{base_url}/{stripped}".replace("//", "/").replace(":/", "://")
+                proxied = main_url + quote(full, safe="")
 
-            proxied_segment = f"{main_url}{requested.safe_sub(segment_url)}"
-            new_content += proxied_segment + "\n"
+            if additional_query:
+                proxied += "&" + additional_query
 
-        content = new_content
+            new_content += proxied + "\n"
 
-    # Rewrite redirect Location headers if needed
-    if "location" in headers:
-        if headers["location"].startswith("/"):
-            headers["location"] = requested.host + headers["location"]
-        headers["location"] = main_url + headers["location"]
+        content = new_content.encode("utf-8")
 
-    resp = Response(content, code, headers=headers)
-    resp.set_cookie("_last_requested", requested.host, max_age=3600, httponly=True)
-    return resp
+    return Response(content, status_code=code, headers=resp_headers)
 
 
 def add_cors(app, origins, setup_with_no_url_param=False):
     cors_path = os.getenv('cors_url', '/cors')
 
     @app.get(cors_path)
-    async def cors_caller(request: Request) -> Response:
+    async def cors_get(request: Request) -> Response:
         return await cors(request, origins=origins)
 
     @app.post(cors_path)
-    async def cors_caller_post(request: Request) -> Response:
+    async def cors_post(request: Request) -> Response:
         return await cors(request, origins=origins, method="POST")
 
     if setup_with_no_url_param:
         @app.get("/{mistaken_relative:path}")
-        async def cors_caller_for_relative(request: Request, mistaken_relative: str, _last_requested: Annotated[str, Cookie(...)]) -> RedirectResponse:
+        async def redirect_get(request: Request, mistaken_relative: str, _last_requested: Annotated[str, Cookie(...)]) -> RedirectResponse:
             x = Requester(str(request.url))
-            query = x.query_string(x.query_params)
-            redirect_url = f"/cors?url={_last_requested}/{mistaken_relative}"
-            if query:
-                redirect_url += f"&{query}"
-            return RedirectResponse(redirect_url)
+            qs = x.query_string(x.query_params)
+            return RedirectResponse(f"/cors?url={_last_requested}/{mistaken_relative}{'&' + qs if qs else ''}")
 
         @app.post("/{mistaken_relative:path}")
-        async def cors_caller_for_relative_post(request: Request, mistaken_relative: str, _last_requested: Annotated[str, Cookie(...)]) -> RedirectResponse:
+        async def redirect_post(request: Request, mistaken_relative: str, _last_requested: Annotated[str, Cookie(...)]) -> RedirectResponse:
             x = Requester(str(request.url))
-            query = x.query_string(x.query_params)
-            redirect_url = f"/cors?url={_last_requested}/{mistaken_relative}"
-            if query:
-                redirect_url += f"&{query}"
-            return RedirectResponse(redirect_url)
+            qs = x.query_string(x.query_params)
+            return RedirectResponse(f"/cors?url={_last_requested}/{mistaken_relative}{'&' + qs if qs else ''}")
