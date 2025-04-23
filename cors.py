@@ -37,23 +37,26 @@ async def cors(request: Request, origins="*", method="GET") -> Response:
     for key in ['Vary', 'Content-Encoding', 'Transfer-Encoding', 'Content-Length']:
         headers.pop(key, None)
 
+    # ✅ Force HTTPS in m3u8 rewriting
     if (file_type == "m3u8" or ".m3u8" in url) and code != 404:
         content = content.decode("utf-8")
         base_url = requested.url.rsplit("/", 1)[0]
         new_content = ""
 
         for line in content.splitlines():
-            if line.startswith("#") or not line.strip():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
                 new_content += line + "\n"
                 continue
 
-            if line.startswith("http"):
-                parsed = urlparse(line)
+            if stripped.startswith("http"):
+                parsed = urlparse(stripped)
+                # Force https even if original is http
                 segment_url = "https://" + parsed.netloc + parsed.path
-            elif line.startswith("/"):
-                segment_url = "https://" + requested.netloc + line
+            elif stripped.startswith("/"):
+                segment_url = "https://" + requested.netloc + stripped
             else:
-                segment_url = "https://" + requested.netloc + requested.path.rsplit("/", 1)[0] + "/" + line
+                segment_url = f"https://{requested.netloc}{requested.path.rsplit('/', 1)[0]}/{stripped}"
 
             proxied_url = main_url + requested.safe_sub(segment_url)
             new_content += proxied_url + "\n"
